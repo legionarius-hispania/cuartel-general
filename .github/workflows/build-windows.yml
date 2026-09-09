@@ -1,0 +1,51 @@
+name: Build Windows executable
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Generar app/web/index.html desde app/shared/app_logic.js
+        # (también genera app/tablet/index.html si app/tablet/template.html
+        # ya existe en el repo; si no, ese destino se omite sin fallar —
+        # así este paso funciona igual mientras solo se despliegan los
+        # cambios de escritorio)
+        run: python tools/build_html.py
+
+      - name: Run automated tests
+        working-directory: app
+        run: |
+          python tests/test_logic.py
+
+      - name: Build executable
+        working-directory: app
+        run: |
+          pyinstaller --noconfirm --onefile --windowed `
+            --name "LegionariusHispania" `
+            --add-data "web;web" `
+            main.py
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LegionariusHispania-Windows
+          path: app/dist/LegionariusHispania.exe
+          retention-days: 30

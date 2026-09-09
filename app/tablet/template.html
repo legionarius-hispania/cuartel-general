@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cuartel General — Legionarius Hispania (Tablet)</title>
+<meta name="description" content="Panel de pedidos, inventario, material y costes de Legionarius Hispania, para tablet.">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#faf9f3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#15140f" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Cuartel General">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Marcellus&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+<div id="root"></div>
+<script id="app-script">{{APP_LOGIC}}</script>
+
+<script id="tablet-bridge">
+/* ------------------------------------------------------------------
+   Puente Supabase para la versión de tablet (PWA).
+
+   El script de arriba (app-script) no sabe nada de esto: solo espera que
+   exista "window.pywebview.api" con los mismos métodos que expone la app
+   de escritorio (get_config, save_config_fields, get_state, save_state,
+   test_supabase_connection, test_shopify_connection, sync_shopify,
+   save_backup_file, pick_backup_file) y que se dispare el evento
+   "pywebviewready" en document cuando esté listo. Aquí implementamos
+   esos mismos métodos hablando directamente por REST con Supabase
+   (PostgREST), en vez de a través de Python — así toda la lógica de la
+   app (pantallas, checklist de preparación, costes...) se reutiliza sin
+   tocarla.
+
+   Importante: la clave de Supabase que se pide en Ajustes debe ser la
+   clave "anon" / "publishable" del proyecto (Project Settings → API),
+   NUNCA la "service_role" — esa nunca debe llegar a un dispositivo
+   compartido como una tablet.
+   ------------------------------------------------------------------ */
+(function(){
+"use strict";
+
+var LS_KEY = 'legionarius_tablet_config_v1';
+
+function loadLocalConfig(){
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}') || {}; }
+  catch(e){ return {}; }
+}
+function saveLocalConfig(cfg){
+  try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)); } catch(e){ /* almacenamiento no disponible: seguimos solo en memoria */ }
+}
+function maskKey(k){
+  if (!k) return '';
+  return '•'.repeat(Math.max(6, k.length - 4)) + k.slice(-4);
+}
+
+var cfg = loadLocalConfig();
+
+function isConfigured(){ return !!(cfg.supabase_url && cfg.supabase_anon_key); }
+function baseUrl(){ return (cfg.supabase_url || '').trim().replace(/\/+$/,''); }
+function headers(prefer){
+  var h = {
+    'apikey': cfg.supabase_anon_key || '',
+    'Authorization': 'Bearer ' + (cfg.supabase_anon_key || ''),
+    'Content-Type': 'application/json'
+  };
+  if (prefer) h['Prefer'] = prefer;
+  return h;
+}
+
+var SupabaseApi = {
+  get_config: function(){
+    return Promise.resolve({
+      shopify_shop: '', shopify_client_id: '', shopify_client_secret: '',
+      supabase_url: cfg.supabase_url || '',
+      supabase_anon_key: maskKey(cfg.supabase_anon_key || '')
+    });
+  },
+
+  save_config_fields: function(fields){
+    fields = fields || {};
+    var next = {
+      supabase_url: (fields.supabase_url || '').trim(),
+      supabase_anon_key: fields.supabase_secret_key ? String(fields.supabase_secret_key).trim() : (cfg.supabase_anon_key || '')
+    };
+    cfg = next;
+    saveLocalConfig(cfg);
+    return this.get_config().then(function(publicCfg){ return {ok:true, config: publicCfg}; });
+  },
+
+  test_shopify_connection: function(){
+    return Promise.resolve({ok:false, error:'La sincronización con Shopify solo está disponible desde el ordenador de escritorio.'});
+  },
+
+  sync_shopify: function(){
+    return Promise.resolve({ok:false, error:'La sincronización con Shopify solo está disponible desde el ordenador de escritorio. Sincroniza allí y esta tablet verá los datos en cuanto refresque.'});
+  },
+
+  test_supabase_connection: function(){
+    if (!isConfigured()) return Promise.resolve({ok:false, error:'Faltan credenciales de Supabase.'});
+    return fetch(baseUrl() + '/rest/v1/app_state?select=id&limit=1', {headers: headers()})
+      .then(function(r){ return {ok: r.ok, error: r.ok ? null : ('HTTP ' + r.status + ' — revisa la URL y la clave anon/publishable')}; })
+      .catch(function(err){ return {ok:false, error: 'No se pudo conectar: ' + (err && err.message ? err.message : err)}; });
+  },
+
+  get_state: function(){
+    if (!isConfigured()) return Promise.resolve({});
+    return fetch(baseUrl() + '/rest/v1/app_state?select=data&id=eq.1', {headers: headers()})
+      .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function(rows){ return (rows && rows[0] && rows[0].data) || {}; });
+  },
+
+  save_state: function(nextState){
+    if (!isConfigured()) return Promise.resolve(nextState);
+    return fetch(baseUrl() + '/rest/v1/app_state?id=eq.1', {
+      method: 'PATCH',
+      headers: headers('return=representation'),
+      body: JSON.stringify({data: nextState})
+    })
+      .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function(rows){ return (rows && rows[0] && rows[0].data) || nextState; });
+  },
+
+  save_backup_file: function(args){
+    args = args || {};
+    try {
+      var blob = new Blob([args.payload || ''], {type:'application/json'});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = args.filename || 'backup.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+      return Promise.resolve({ok:true, path:'la carpeta de descargas de esta tablet'});
+    } catch(err){
+      return Promise.resolve({ok:false, error: String(err)});
+    }
+  },
+
+  pick_backup_file: function(){
+    /* No se usa: restaurar una copia en la tablet ya se hace con el
+       selector de archivo normal del propio formulario. */
+    return Promise.resolve({ok:false, cancelled:true});
+  }
+};
+
+window.pywebview = { api: SupabaseApi };
+
+document.addEventListener('DOMContentLoaded', function(){
+  document.dispatchEvent(new Event('pywebviewready'));
+});
+
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+  document.dispatchEvent(new Event('pywebviewready'));
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function(){
+    navigator.serviceWorker.register('service-worker.js').catch(function(err){
+      console.error('No se pudo registrar el service worker', err);
+    });
+  });
+}
+
+})();
+</script>
+</body>
+</html>

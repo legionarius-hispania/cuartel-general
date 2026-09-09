@@ -1,0 +1,11 @@
+{
+  "name": "legionarius-cuartel-general",
+  "private": true,
+  "description": "Herramientas de desarrollo (pruebas de extremo a extremo con navegador). La app en sí es Python + HTML/JS sin dependencias de Node.",
+  "scripts": {
+    "test:e2e": "node app/tests/test_ui_e2e.js"
+  },
+  "devDependencies": {
+    "playwright": "1.56.0"
+  }
+}
