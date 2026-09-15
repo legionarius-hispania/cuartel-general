@@ -567,21 +567,6 @@ function parseCSV(text){
   return rows;
 }
 
-/* ---------- stock application ---------- */
-function applyOrderStock(order, apply, reasonPrefix){
-  var i, item, product;
-  for (i=0;i<order.items.length;i++){
-    item = order.items[i];
-    product = findProductBySku(item.sku) || findProductByName(item.name);
-    if (!product) continue;
-    var delta = apply ? -Math.abs(num(item.qty,0)) : Math.abs(num(item.qty,0));
-    product.stock = num(product.stock,0) + delta;
-    state.movements.unshift({id:uid(), ts:new Date().toISOString(), sku:product.sku,
-      delta:delta, reason:(reasonPrefix||'')+ (order.channel||'') + ' #' + (order.externalId||order.id)});
-  }
-  order.stockApplied = !!apply;
-}
-
 /* ---------- commit / persistence ---------- */
 function setStatus(s){ ui.status = s; }
 
@@ -620,6 +605,21 @@ function commit(mutator){
     console.error('commit: save_state falló', err);
     setStatus('unsaved'); render();
   });
+}
+
+/* Patrón compartido por todos los formularios y diálogos de confirmación
+   que solo cambian el estado compartido (crear/editar/borrar un pedido,
+   producto, material...): commit() ya pinta un primer render() mientras el
+   formulario o el borrador de ui seguía con sus valores anteriores, así que
+   sin un render() extra DESPUÉS de resetearlos (resetFn) se quedarían
+   visibles hasta el siguiente cambio de pantalla en modo local/sin conexión
+   (en el modo normal, con guardado en Supabase, el redibujado posterior al
+   guardado lo disimulaba, por eso no se detectó hasta las pruebas de
+   extremo a extremo de la auditoría del 2026-09-09). */
+function commitAndReset(mutator, resetFn){
+  commit(mutator);
+  resetFn();
+  render();
 }
 
 function refreshFromShared(){
@@ -805,9 +805,7 @@ function renderOrders(){
       '<td class="stock-num">'+fmtMoney(o.total)+'</td>' +
       '<td><button class="btn ghost small" data-action="toggle-order-prep" data-id="'+o.id+'"><span class="badge '+prepBadgeClass+'">'+prepBadgeText+'</span> '+(prepExpanded?'▾':'▸')+'</button></td>' +
       '<td><label class="row-flex" style="gap:6px;"><input type="checkbox" data-action="toggle-shipped" data-id="'+o.id+'" '+(o.shipped?'checked':'')+'> '+(o.shipped?'Sí':'No')+'</label></td>' +
-      '<td>' + (ui.confirm && ui.confirm.key === 'order:'+o.id ?
-        '<button class="btn danger small" data-action="confirm-delete-order" data-id="'+o.id+'">¿Seguro?</button> <button class="btn ghost small" data-action="cancel-confirm">Cancelar</button>' :
-        '<button class="btn ghost small" data-action="ask-delete-order" data-id="'+o.id+'">Eliminar</button>') +
+      '<td>' + confirmDeleteActionsHtml('order', o.id) +
       '</td></tr>';
     var detail = '';
     if (expanded) {
@@ -1135,11 +1133,11 @@ function renderInventory(){
         '<button class="btn ghost small" data-action="adj-cancel">Cancelar</button>' +
         '</div>';
     }
-    var actions = ui.confirm && ui.confirm.key === 'product:'+p.id ?
-      '<button class="btn danger small" data-action="confirm-delete-product" data-id="'+p.id+'">¿Seguro?</button> <button class="btn ghost small" data-action="cancel-confirm">Cancelar</button>' :
+    var actions = (ui.confirm && ui.confirm.key === 'product:'+p.id) ?
+      confirmDeleteActionsHtml('product', p.id) :
       '<button class="btn ghost small" data-action="open-adjust" data-id="'+p.id+'">Ajustar</button> ' +
       '<button class="btn ghost small" data-action="open-edit" data-id="'+p.id+'">Editar</button> ' +
-      '<button class="btn ghost small" data-action="ask-delete-product" data-id="'+p.id+'">Eliminar</button>';
+      confirmDeleteActionsHtml('product', p.id);
     return '<tr><td class="mono">'+esc(p.sku)+'</td><td>'+esc(p.name)+'</td>' +
       '<td>'+stockCell+'</td><td class="stock-num">'+num(p.threshold,0)+'</td>' +
       '<td>'+(low?'<span class="badge crit">Stock bajo</span>':'<span class="badge ok">OK</span>')+'</td>' +
@@ -1372,6 +1370,13 @@ function fixedSelectOptions(knownList, currentVal){
 function dtfUnitCost(m){
   return (num(m.altoCm,0)/100) * num(state.costs.rates.dtfCostPerMeter,0);
 }
+/* Celda de coste unitario de un DTF, igual en Material (renderMaterial /
+   materialRowHtml) y en Costes (renderCosts → "Coste unitario por diseño
+   DTF"): mismo dato, mismo formato, así que se calcula en un solo sitio en
+   vez de repetir la misma expresión en las dos pantallas. */
+function dtfUnitCostCell(m){
+  return '<td class="stock-num">'+(num(m.altoCm,0) ? fmtMoney(dtfUnitCost(m)) : '<span class="muted">—</span>')+'</td>';
+}
 function dtfSizeLabel(m){
   var alto = num(m.altoCm,0), ancho = num(m.anchoCm,0);
   if (!alto && !ancho) return '<span class="muted">—</span>';
@@ -1419,11 +1424,11 @@ function materialRowHtml(m, cols){
       '<button class="btn ghost small" data-action="mat-adj-cancel">Cancelar</button>' +
       '</div>';
   }
-  var actions = ui.confirm && ui.confirm.key === 'material:'+m.id ?
-    '<button class="btn danger small" data-action="mat-confirm-delete" data-id="'+m.id+'">¿Seguro?</button> <button class="btn ghost small" data-action="mat-cancel-confirm">Cancelar</button>' :
+  var actions = (ui.confirm && ui.confirm.key === 'material:'+m.id) ?
+    confirmDeleteActionsHtml('material', m.id) :
     '<button class="btn ghost small" data-action="mat-open-adjust" data-id="'+m.id+'">Ajustar</button> ' +
     '<button class="btn ghost small" data-action="mat-open-edit" data-id="'+m.id+'">Editar</button> ' +
-    '<button class="btn ghost small" data-action="mat-ask-delete" data-id="'+m.id+'">Eliminar</button>';
+    confirmDeleteActionsHtml('material', m.id);
   var imgCell = '<td>' + (m.imageDataUrl ?
     '<img src="'+esc(m.imageDataUrl)+'" style="width:34px;height:34px;object-fit:cover;border-radius:6px;border:1px solid var(--border);display:block;">' :
     '<span class="muted">—</span>') + '</td>';
@@ -1432,7 +1437,7 @@ function materialRowHtml(m, cols){
      '<td class="stock-num">'+(num(m.unitCost,0) ? fmtMoney(num(m.unitCost,0)) : '<span class="muted">—</span>')+'</td>') :
     (imgCell+'<td>'+esc(m.name)+'</td><td>'+(m.detail?esc(m.detail):'<span class="muted">—</span>')+'</td><td>'+esc(m.placement)+'</td>' +
      '<td class="stock-num">'+dtfSizeLabel(m)+'</td>' +
-     '<td class="stock-num">'+(num(m.altoCm,0) ? fmtMoney(dtfUnitCost(m)) : '<span class="muted">—</span>')+'</td>');
+     dtfUnitCostCell(m));
   return '<tr>' + labelCells +
     '<td>'+stockCell+'</td><td class="stock-num">'+num(m.threshold,0)+'</td>' +
     '<td>'+(low?'<span class="badge crit">Stock bajo</span>':'<span class="badge ok">OK</span>')+'</td>' +
@@ -1518,13 +1523,18 @@ function renderMaterial(){
     moveSection;
 }
 
-function refImageActionsHtml(img){
-  var confirmKey = 'refimg:'+img.id;
-  if (ui.confirm && ui.confirm.key === confirmKey) {
-    return '<button class="btn danger small" data-action="confirm-delete-refimg" data-id="'+img.id+'">¿Seguro?</button> ' +
+/* Botón "Eliminar" (o, tras pulsarlo, "¿Seguro?"/"Cancelar") para
+   cualquier tipo de fila borrable de la app — pedido, producto, material,
+   imagen de referencia, máquina o entrada del libro de ingresos/gastos.
+   `kind` identifica el tipo (coincide con el prefijo de ui.confirm.key) y
+   se manda también en el propio botón para que el único par de acciones
+   'ask-delete'/'confirm-delete' del onClick sepa a qué deleteX() llamar. */
+function confirmDeleteActionsHtml(kind, id){
+  if (ui.confirm && ui.confirm.key === kind+':'+id) {
+    return '<button class="btn danger small" data-action="confirm-delete" data-kind="'+kind+'" data-id="'+id+'">¿Seguro?</button> ' +
       '<button class="btn ghost small" data-action="cancel-confirm">Cancelar</button>';
   }
-  return '<button class="btn ghost small" data-action="ask-delete-refimg" data-id="'+img.id+'">Eliminar</button>';
+  return '<button class="btn ghost small" data-action="ask-delete" data-kind="'+kind+'" data-id="'+id+'">Eliminar</button>';
 }
 
 /* Base de imágenes de referencia de DTF: fotos que se pueden reutilizar en
@@ -1576,22 +1586,13 @@ function renderDtfImageLibrary(){
         '<div class="hint" style="margin:6px 0 4px;">Color de camiseta (opcional):</div>' +
         '<div class="row-flex" style="flex-wrap:wrap;gap:8px 18px;">' + colorBoxes + '</div>' +
       '</div>' +
-      refImageActionsHtml(img) +
+      confirmDeleteActionsHtml('refimg', img.id) +
       '</div>';
   }).join('');
 
   return addForm + '<div class="section"><h2>Imágenes de referencia guardadas</h2>' +
     (state.dtfImages.length ? listItems : '<div class="empty">Aún no hay ninguna. Añade la primera arriba.</div>') +
     '</div>';
-}
-
-function costActionsHtml(kind, item){
-  var confirmKey = kind+':'+item.id;
-  if (ui.confirm && ui.confirm.key === confirmKey) {
-    return '<button class="btn danger small" data-action="cost-confirm-delete" data-kind="'+kind+'" data-id="'+item.id+'">¿Seguro?</button> ' +
-      '<button class="btn ghost small" data-action="cost-cancel-confirm">Cancelar</button>';
-  }
-  return '<button class="btn ghost small" data-action="cost-ask-delete" data-kind="'+kind+'" data-id="'+item.id+'">Eliminar</button>';
 }
 
 function renderCosts(){
@@ -1639,7 +1640,7 @@ function renderCosts(){
   var dtfUnitRows = dtfMaterials.map(function(m){
     return '<tr><td>'+esc(m.name)+'</td><td>'+(m.detail?esc(m.detail):'<span class="muted">—</span>')+'</td><td>'+esc(m.placement)+'</td>' +
       '<td class="stock-num">'+dtfSizeLabel(m)+'</td>' +
-      '<td class="stock-num">'+(num(m.altoCm,0) ? fmtMoney(dtfUnitCost(m)) : '<span class="muted">—</span>')+'</td></tr>';
+      dtfUnitCostCell(m)+'</tr>';
   }).join('');
   var dtfUnitSection = '<div class="section"><h2>Coste unitario por diseño DTF</h2>' +
     '<div class="hint" style="margin-bottom:10px;">Tamaño (alto × ancho, en cm) de cada diseño, indicado en Material → DTF. El coste se calcula con el ALTO (la longitud de rollo que ocupa, convertida a metros) multiplicado por la tarifa "Coste DTF (€/metro lineal)" de arriba; el ancho es orientativo para que compruebes que cabe en el ancho del rollo que uses. Cambia el tamaño de un diseño o la tarifa y este cálculo se actualiza solo.</div>' +
@@ -1663,7 +1664,7 @@ function renderCosts(){
   var machines = (c.machines||[]).slice().sort(function(a,b){ return (b.date||'').localeCompare(a.date||''); });
   var machineRows = limitedRows('costMachines', machines.map(function(x){
     return '<tr><td>'+fmtDateShort(x.date)+'</td><td>'+esc(x.name)+'</td><td class="stock-num">'+fmtMoney(x.amount)+'</td>' +
-      '<td>'+(x.note?esc(x.note):'<span class="muted">—</span>')+'</td><td>'+costActionsHtml('machine', x)+'</td></tr>';
+      '<td>'+(x.note?esc(x.note):'<span class="muted">—</span>')+'</td><td>'+confirmDeleteActionsHtml('machine', x.id)+'</td></tr>';
   }), 5);
   var machinesTotal = machines.reduce(function(a,x){ return a+num(x.amount,0); }, 0);
   var machineTable = machines.length ?
@@ -1718,7 +1719,7 @@ function renderCosts(){
     var badge = x.type === 'ingreso' ? '<span class="badge ok">Ingreso</span>' : '<span class="badge crit">Gasto</span>';
     return '<tr><td>'+fmtDateShort(x.date)+'</td><td>'+badge+'</td><td>'+esc(x.concept)+'</td>' +
       '<td>'+(x.category?esc(x.category):'<span class="muted">—</span>')+'</td>' +
-      '<td class="stock-num">'+fmtMoney(x.amount)+'</td><td>'+costActionsHtml('ledger', x)+'</td></tr>';
+      '<td class="stock-num">'+fmtMoney(x.amount)+'</td><td>'+confirmDeleteActionsHtml('ledger', x.id)+'</td></tr>';
   }), 5);
   /* Total por categoría, solo de los gastos (los ingresos no llevan
      categoría): sustituye al que antes calculaba solo "Gastos". */
@@ -2041,7 +2042,7 @@ function onClick(e){
 
   if (action === 'toggle-order-items') { ui.expandedOrder = (ui.expandedOrder === id ? null : id); render(); return; }
   if (action === 'toggle-order-prep') { ui.expandedPrepOrder = (ui.expandedPrepOrder === id ? null : id); render(); return; }
-  if (action === 'undo-fulfilled') { toggleFulfilled(id, false); return; }
+  if (action === 'undo-fulfilled') { undoFulfilled(id); return; }
   if (action === 'toggle-list') { var lk = t.dataset.key; ui.expandedLists[lk] = !ui.expandedLists[lk]; render(); return; }
   if (action === 'toggle-model') { ui.expandedModel = (ui.expandedModel === id ? null : id); render(); return; }
 
@@ -2071,28 +2072,34 @@ function onClick(e){
   if (action === 'ed-cancel') { ui.editingProductId = null; render(); return; }
   if (action === 'ed-save') { submitEdit(id); return; }
 
-  if (action === 'ask-delete-product') { ui.confirm = {key:'product:'+id}; render(); return; }
-  if (action === 'confirm-delete-product') { deleteProduct(id); return; }
-  if (action === 'ask-delete-order') { ui.confirm = {key:'order:'+id}; render(); return; }
-  if (action === 'confirm-delete-order') { deleteOrder(id); return; }
   if (action === 'order-label-remove') { removeOrderLabel(id); return; }
   if (action === 'prep-image-remove') { removePrepImage(id, t.dataset.field); return; }
   if (action === 'refimg-draft-image-remove') { ui.newRefImageDraft.dataUrl = ''; render(); return; }
   if (action === 'refimg-submit') { submitNewRefImage(); return; }
-  if (action === 'ask-delete-refimg') { ui.confirm = {key:'refimg:'+id}; render(); return; }
-  if (action === 'confirm-delete-refimg') { deleteRefImage(id); return; }
+
+  /* Borrar cualquier tipo de fila (pedido, producto, material, imagen de
+     referencia, máquina o entrada del libro): un único par de acciones,
+     con el tipo en data-kind, en vez de un par "ask/confirm-delete-X" por
+     cada pantalla (ver confirmDeleteActionsHtml). */
+  if (action === 'ask-delete') { ui.confirm = {key: t.dataset.kind+':'+id}; render(); return; }
+  if (action === 'confirm-delete') {
+    var delKind = t.dataset.kind;
+    if (delKind === 'order') deleteOrder(id);
+    else if (delKind === 'product') deleteProduct(id);
+    else if (delKind === 'material') deleteMaterial(id);
+    else if (delKind === 'refimg') deleteRefImage(id);
+    else if (delKind === 'machine' || delKind === 'ledger') deleteCostEntry(delKind, id);
+    return;
+  }
   if (action === 'cancel-confirm') { ui.confirm = null; render(); return; }
 
   if (action === 'ask-reset-all') { ui.confirm = {key:'reset-all'}; render(); return; }
   if (action === 'confirm-reset-all') {
-    commit(function(next){
+    commitAndReset(function(next){
       next.products = []; next.orders = []; next.movements = []; next.materials = []; next.dtfImages = [];
       next.costs = {rates:{blankShirtCost:0, dtfCostPerMeter:0}, expenses:[], machines:[], ledger:[]};
-    });
-    /* Mismo ajuste que en submitNewOrder(): sin este render(), el botón de
-       confirmación se quedaba visible hasta el siguiente cambio de
-       pantalla en modo local/sin conexión. */
-    ui.confirm = null; render(); return;
+    }, function(){ ui.confirm = null; });
+    return;
   }
 
   if (action === 'imp-parse') { parseImportInput(); return; }
@@ -2138,15 +2145,9 @@ function onClick(e){
   if (action === 'mat-ed-save') { submitMaterialEdit(id); return; }
   if (action === 'mat-image-remove') { if (ui.editMaterialDraft) { ui.editMaterialDraft.imageDataUrl = ''; render(); } return; }
   if (action === 'dtf-image-remove') { ui.newDtfDraft.imageDataUrl = ''; render(); return; }
-  if (action === 'mat-ask-delete') { ui.confirm = {key:'material:'+id}; render(); return; }
-  if (action === 'mat-confirm-delete') { deleteMaterial(id); return; }
-  if (action === 'mat-cancel-confirm') { ui.confirm = null; render(); return; }
 
   if (action === 'mach-submit') { submitNewMachine(); return; }
   if (action === 'ledg-submit') { submitNewLedger(); return; }
-  if (action === 'cost-ask-delete') { ui.confirm = {key:(t.dataset.kind)+':'+id}; render(); return; }
-  if (action === 'cost-confirm-delete') { deleteCostEntry(t.dataset.kind, id); return; }
-  if (action === 'cost-cancel-confirm') { ui.confirm = null; render(); return; }
 
   if (action === 'cfg-save') { saveConfigFields(); return; }
   if (action === 'cfg-test-shopify') { testShopifyConnection(); return; }
@@ -2155,14 +2156,9 @@ function onClick(e){
   if (action === 'alias-add-submit') {
     var draft = ui.colorAliasDraft;
     if (!draft.alias.trim() || !draft.canonical.trim()) return;
-    commit(function(next){
+    commitAndReset(function(next){
       next.settings.colorAliases = (next.settings.colorAliases||[]).concat([{alias: draft.alias.trim(), canonical: draft.canonical.trim()}]);
-    });
-    /* Mismo ajuste que en submitNewOrder(): sin este render(), el formulario
-       se quedaba con los datos ya guardados visibles hasta el siguiente
-       cambio de pantalla en modo local/sin conexión. */
-    ui.colorAliasDraft = {alias:'', canonical:''};
-    render();
+    }, function(){ ui.colorAliasDraft = {alias:'', canonical:''}; });
     return;
   }
   if (action === 'alias-delete') {
@@ -2175,12 +2171,7 @@ function onClick(e){
   if (action === 'sizes-save') {
     var text = ui.expectedSizesDraft !== null ? ui.expectedSizesDraft : (state.settings.expectedSizes||[]).join(', ');
     var list = text.split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s; });
-    commit(function(next){ next.settings.expectedSizes = list; });
-    /* Mismo ajuste que en submitNewOrder(): sin este render(), el campo se
-       quedaba con el texto sin normalizar visible hasta el siguiente
-       cambio de pantalla en modo local/sin conexión. */
-    ui.expectedSizesDraft = null;
-    render();
+    commitAndReset(function(next){ next.settings.expectedSizes = list; }, function(){ ui.expectedSizesDraft = null; });
     return;
   }
 }
@@ -2379,25 +2370,19 @@ function submitNewOrder(){
     status: d.status, usuario: d.usuario || '', items: items, total: total, fulfilled: false, shipped: false, stockApplied: false,
     source: 'manual', importedAt: new Date().toISOString()
   };
-  commit(function(next){
+  commitAndReset(function(next){
     next.orders.push(order);
     if (d.deduct) {
       var no = next.orders[next.orders.length-1];
       applyOrderStockOnState(next, no, true, 'Pedido manual ');
     }
-  });
-  /* Corregido tras las pruebas de extremo a extremo añadidas junto con la
-     auditoría del 2026-09-09: commit() ya ha pintado un primer render()
-     mientras ui.newOrderOpen todavía era true, así que sin este render()
-     extra el formulario se quedaba visualmente abierto hasta el próximo
-     cambio de pantalla en modo local/sin conexión (en el modo normal, con
-     guardado en Supabase, el redibujado posterior al guardado disimulaba
-     el problema, por eso no se había notado). */
-  ui.newOrderOpen = false; ui.newOrderDraft = null;
-  render();
+  }, function(){ ui.newOrderOpen = false; ui.newOrderDraft = null; });
 }
 
-/* state-scoped variant of applyOrderStock for use inside commit() mutators (operates on `next`) */
+/* Aplica (o revierte) el descuento de stock de un pedido: producto vendido
+   y, si tiene receta, sus materiales (ver applyMaterialsForOrderItem). Opera
+   siempre sobre `target` (el `next` de un commit()), nunca sobre el estado
+   real directamente. */
 function applyOrderStockOnState(target, order, apply, reasonPrefix){
   order.items.forEach(function(item){
     var product = null;
@@ -2471,16 +2456,14 @@ function applyMaterialsForOrderItem(target, product, qty, apply, reasonPrefix, o
 /* "Preparado" ya no se marca a mano (ver syncFulfilledFromPrep): esta
    función queda solo para deshacerlo por error desde el propio checklist
    ("Deshacer preparación"), cuando alguien ha completado el checklist sin
-   querer o necesita reabrirlo. checked siempre llega como false desde la
-   única llamada que queda (data-action="undo-fulfilled"). */
-function toggleFulfilled(id, checked){
+   querer o necesita reabrirlo (única llamada: data-action="undo-fulfilled"). */
+function undoFulfilled(id){
   commit(function(next){
     var order = next.orders.find(function(o){ return o.id === id; });
     if (!order) return;
-    order.fulfilled = checked;
-    if (!checked) order.autoFulfilled = false;
-    if (checked && !order.stockApplied) applyOrderStockOnState(next, order, true, 'Preparado ');
-    else if (!checked && order.stockApplied) applyOrderStockOnState(next, order, false, 'Reversión preparación ');
+    order.fulfilled = false;
+    order.autoFulfilled = false;
+    if (order.stockApplied) applyOrderStockOnState(next, order, false, 'Reversión preparación ');
   });
 }
 
@@ -2548,18 +2531,13 @@ function setOrderUsuario(id, val){
 }
 
 function deleteOrder(id){
-  commit(function(next){
+  commitAndReset(function(next){
     var idx = next.orders.findIndex(function(o){ return o.id === id; });
     if (idx < 0) return;
     var order = next.orders[idx];
     if (order.stockApplied) applyOrderStockOnState(next, order, false, 'Eliminación pedido ');
     next.orders.splice(idx,1);
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el botón de
-     confirmación de borrado se quedaba visible hasta el siguiente cambio
-     de pantalla en modo local/sin conexión. */
-  ui.confirm = null;
-  render();
+  }, function(){ ui.confirm = null; });
 }
 
 function submitNewProduct(){
@@ -2570,57 +2548,38 @@ function submitNewProduct(){
     threshold: d.threshold === '' ? state.settings.defaultThreshold : num(d.threshold,0),
     price: num(d.price,0)
   };
-  commit(function(next){ next.products.push(product); });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el formulario
-     se quedaba con los datos del producto ya creado visibles hasta el
-     siguiente cambio de pantalla en modo local/sin conexión. */
-  ui.newProductDraft = {sku:'', name:'', stock:'', threshold:'', price:''};
-  render();
+  commitAndReset(function(next){ next.products.push(product); },
+    function(){ ui.newProductDraft = {sku:'', name:'', stock:'', threshold:'', price:''}; });
 }
 
 function submitEdit(id){
   var ed = ui.editDraft;
-  commit(function(next){
+  commitAndReset(function(next){
     var p = next.products.find(function(pp){ return pp.id === id; });
     if (!p) return;
     p.sku = (ed.sku||'').trim(); p.name = (ed.name||'').trim();
     p.threshold = num(ed.threshold,0); p.price = num(ed.price,0);
     p.recipe = {dtfIds: Array.isArray(ed.recipeDtfIds) ? ed.recipeDtfIds.slice() : []};
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el formulario
-     de edición se quedaba visible hasta el siguiente cambio de pantalla en
-     modo local/sin conexión. */
-  ui.editingProductId = null; ui.editDraft = null;
-  render();
+  }, function(){ ui.editingProductId = null; ui.editDraft = null; });
 }
 
 function submitAdjust(id){
   var ad = ui.adjustDraft;
   var amount = num(ad.amount, 0);
   if (!amount) { ui.toast = 'Indica una cantidad distinta de cero.'; render(); return; }
-  commit(function(next){
+  commitAndReset(function(next){
     var p = next.products.find(function(pp){ return pp.id === id; });
     if (!p) return;
     p.stock = num(p.stock,0) + amount;
     next.movements.unshift({id:uid(), ts:new Date().toISOString(), sku:p.sku, delta:amount, reason: ad.reason || 'Ajuste manual'});
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el formulario
-     de ajuste se quedaba visible hasta el siguiente cambio de pantalla en
-     modo local/sin conexión. */
-  ui.adjustingProductId = null; ui.adjustDraft = null;
-  render();
+  }, function(){ ui.adjustingProductId = null; ui.adjustDraft = null; });
 }
 
 function deleteProduct(id){
-  commit(function(next){
+  commitAndReset(function(next){
     var idx = next.products.findIndex(function(p){ return p.id === id; });
     if (idx >= 0) next.products.splice(idx,1);
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el botón de
-     confirmación de borrado se quedaba visible hasta el siguiente cambio
-     de pantalla en modo local/sin conexión. */
-  ui.confirm = null;
-  render();
+  }, function(){ ui.confirm = null; });
 }
 
 /* ---------- material (camisetas en blanco + DTF) ---------- */
@@ -2633,19 +2592,14 @@ function submitNewBlank(){
     return m.kind==='blank' && String(m.color).toLowerCase()===color.toLowerCase() && String(m.size).toLowerCase()===size.toLowerCase();
   });
   if (dup) { ui.toast = 'Ya existe esa combinación de color y talla.'; render(); return; }
-  commit(function(next){
+  commitAndReset(function(next){
     next.materials.push({
       id: uid(), kind:'blank', color: color, size: size,
       unitCost: num(d.unitCost,0),
       stock: num(d.stock,0), threshold: d.threshold==='' ? state.settings.defaultThreshold : num(d.threshold,0),
       imageDataUrl: ''
     });
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el formulario
-     se quedaba con los datos ya creados visibles hasta el siguiente cambio
-     de pantalla en modo local/sin conexión. */
-  ui.newBlankDraft = {color:'Blanca', size:'S', stock:'', threshold:'', unitCost:''};
-  render();
+  }, function(){ ui.newBlankDraft = {color:'Blanca', size:'S', stock:'', threshold:'', unitCost:''}; });
 }
 /* Crea de golpe todas las combinaciones de color × talla que pediste
    (los 5 colores conocidos, en S/M/L/XL) que todavía no existan, con
@@ -2687,36 +2641,26 @@ function submitNewDtf(){
       String(m.placement).toLowerCase()===placement.toLowerCase();
   });
   if (dup) { ui.toast = 'Ya existe ese DTF con ese diseño/modelo y esa colocación.'; render(); return; }
-  commit(function(next){
+  commitAndReset(function(next){
     next.materials.push({
       id: uid(), kind:'dtf', name: name, detail: detail, placement: placement,
       altoCm: num(d.altoCm,0), anchoCm: num(d.anchoCm,0),
       stock: num(d.stock,0), threshold: d.threshold==='' ? state.settings.defaultThreshold : num(d.threshold,0),
       imageDataUrl: d.imageDataUrl || ''
     });
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el formulario
-     se quedaba con los datos ya creados visibles hasta el siguiente cambio
-     de pantalla en modo local/sin conexión. */
-  ui.newDtfDraft = {name:'', detail:'', placement:'Pecho', altoCm:'', anchoCm:'', stock:'', threshold:'', imageDataUrl:''};
-  render();
+  }, function(){ ui.newDtfDraft = {name:'', detail:'', placement:'Pecho', altoCm:'', anchoCm:'', stock:'', threshold:'', imageDataUrl:''}; });
 }
 
 function submitMaterialAdjust(id){
   var ad = ui.adjustMaterialDraft;
   var amount = num(ad.amount, 0);
   if (!amount) { ui.toast = 'Indica una cantidad distinta de cero.'; render(); return; }
-  commit(function(next){
+  commitAndReset(function(next){
     var m = next.materials.find(function(x){ return x.id === id; });
     if (!m) return;
     m.stock = num(m.stock,0) + amount;
     next.movements.unshift({id:uid(), ts:new Date().toISOString(), materialId:m.id, materialLabel: materialLabel(m), delta:amount, reason: ad.reason || 'Ajuste manual'});
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el formulario
-     de ajuste se quedaba visible hasta el siguiente cambio de pantalla en
-     modo local/sin conexión. */
-  ui.adjustingMaterialId = null; ui.adjustMaterialDraft = null;
-  render();
+  }, function(){ ui.adjustingMaterialId = null; ui.adjustMaterialDraft = null; });
 }
 
 function submitMaterialEdit(id){
@@ -2737,24 +2681,14 @@ function submitMaterialEdit(id){
     }
     m.threshold = num(ed.threshold, m.threshold);
     m.imageDataUrl = ed.imageDataUrl || '';
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el formulario
-     de edición se quedaba visible hasta el siguiente cambio de pantalla en
-     modo local/sin conexión. */
-  ui.editingMaterialId = null; ui.editMaterialDraft = null;
-  render();
+  }, function(){ ui.editingMaterialId = null; ui.editMaterialDraft = null; });
 }
 
 function deleteMaterial(id){
-  commit(function(next){
+  commitAndReset(function(next){
     var idx = next.materials.findIndex(function(m){ return m.id === id; });
     if (idx >= 0) next.materials.splice(idx,1);
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el botón de
-     confirmación de borrado se quedaba visible hasta el siguiente cambio
-     de pantalla en modo local/sin conexión. */
-  ui.confirm = null;
-  render();
+  }, function(){ ui.confirm = null; });
 }
 
 /* ---------- costes ---------- */
@@ -2763,14 +2697,9 @@ function submitNewMachine(){
   var name = (d.name||'').trim();
   var amount = num(d.amount, NaN);
   if (!d.date || !name || !(amount > 0)) { ui.toast = 'Indica fecha, nombre e importe (mayor que 0).'; render(); return; }
-  commit(function(next){
+  commitAndReset(function(next){
     next.costs.machines.push({id: uid(), date: d.date, name: name, amount: amount, note: (d.note||'').trim()});
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el formulario
-     se quedaba con los datos ya guardados visibles hasta el siguiente
-     cambio de pantalla en modo local/sin conexión. */
-  ui.newMachineDraft = {date: todayISO(), name:'', amount:'', note:''};
-  render();
+  }, function(){ ui.newMachineDraft = {date: todayISO(), name:'', amount:'', note:''}; });
 }
 
 function submitNewLedger(){
@@ -2779,28 +2708,18 @@ function submitNewLedger(){
   var amount = num(d.amount, NaN);
   if (!d.date || !concept || !(amount > 0)) { ui.toast = 'Indica fecha, concepto e importe (mayor que 0).'; render(); return; }
   var type = d.type === 'ingreso' ? 'ingreso' : 'gasto';
-  commit(function(next){
+  commitAndReset(function(next){
     next.costs.ledger.push({id: uid(), date: d.date, type: type, concept: concept,
       category: type === 'gasto' ? (d.category || '') : '', amount: amount});
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el formulario
-     se quedaba con los datos ya guardados visibles hasta el siguiente
-     cambio de pantalla en modo local/sin conexión. */
-  ui.newLedgerDraft = {date: todayISO(), type:'ingreso', concept:'', category: d.category || 'Planchas (consumo)', amount:''};
-  render();
+  }, function(){ ui.newLedgerDraft = {date: todayISO(), type:'ingreso', concept:'', category: d.category || 'Planchas (consumo)', amount:''}; });
 }
 
 function deleteCostEntry(kind, id){
-  commit(function(next){
+  commitAndReset(function(next){
     var arr = kind === 'machine' ? next.costs.machines : next.costs.ledger;
     var idx = arr.findIndex(function(x){ return x.id === id; });
     if (idx >= 0) arr.splice(idx,1);
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el botón de
-     confirmación de borrado se quedaba visible hasta el siguiente cambio
-     de pantalla en modo local/sin conexión. */
-  ui.confirm = null;
-  render();
+  }, function(){ ui.confirm = null; });
 }
 
 /* Foto de referencia de un diseño/material: se puede añadir en cualquier
@@ -3058,12 +2977,8 @@ function submitNewRefImage(){
       blancas: !!d.tags.blancas, oscuras: !!d.tags.oscuras
     }
   };
-  commit(function(next){ next.dtfImages.push(img); });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el formulario
-     se quedaba con los datos ya guardados visibles hasta el siguiente
-     cambio de pantalla en modo local/sin conexión. */
-  ui.newRefImageDraft = {name:'', dataUrl:'', tags:{etiquetaCuello:false, bandera:false, escudo:false, estampado:false, blancas:false, oscuras:false}};
-  render();
+  commitAndReset(function(next){ next.dtfImages.push(img); },
+    function(){ ui.newRefImageDraft = {name:'', dataUrl:'', tags:{etiquetaCuello:false, bandera:false, escudo:false, estampado:false, blancas:false, oscuras:false}}; });
 }
 function toggleRefImageTag(id, field, checked){
   commit(function(next){
@@ -3074,15 +2989,10 @@ function toggleRefImageTag(id, field, checked){
   });
 }
 function deleteRefImage(id){
-  commit(function(next){
+  commitAndReset(function(next){
     var idx = next.dtfImages.findIndex(function(x){ return x.id === id; });
     if (idx >= 0) next.dtfImages.splice(idx,1);
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el botón de
-     confirmación de borrado se quedaba visible hasta el siguiente cambio
-     de pantalla en modo local/sin conexión. */
-  ui.confirm = null;
-  render();
+  }, function(){ ui.confirm = null; });
 }
 
 /* ---------- import flow ---------- */
@@ -3164,18 +3074,15 @@ function buildImportPreview(){
 function confirmImport(){
   var newOrders = ui.importPreview.orders;
   var deduct = ui.importDeduct;
-  commit(function(next){
+  commitAndReset(function(next){
     newOrders.forEach(function(o){
       next.orders.push(o);
       if (deduct) applyOrderStockOnState(next, o, true, 'Importación ');
     });
+  }, function(){
+    ui.importParsed = null; ui.importMapping = {}; ui.importPreview = null; ui.importRaw = '';
+    ui.importUnmatched = []; ui.importSkippedDup = 0;
   });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), la pantalla de
-     importación se quedaba visible hasta el siguiente cambio de pantalla
-     en modo local/sin conexión. */
-  ui.importParsed = null; ui.importMapping = {}; ui.importPreview = null; ui.importRaw = '';
-  ui.importUnmatched = []; ui.importSkippedDup = 0;
-  render();
 }
 
 /* ---------- backup ---------- */
@@ -3203,29 +3110,16 @@ function restoreBackupConfirmed(){
   var parsed;
   try { parsed = JSON.parse(ui.restoreRaw); } catch(e) { ui.toast = 'El archivo no es un JSON válido.'; ui.restorePending = false; render(); return; }
   if (!parsed || typeof parsed !== 'object') { ui.toast = 'Archivo de copia no válido.'; ui.restorePending = false; render(); return; }
-  commit(function(next){
-    next.products = Array.isArray(parsed.products) ? parsed.products : [];
-    next.orders = Array.isArray(parsed.orders) ? parsed.orders : [];
-    next.movements = Array.isArray(parsed.movements) ? parsed.movements : [];
-    next.materials = Array.isArray(parsed.materials) ? parsed.materials : [];
-    next.dtfImages = Array.isArray(parsed.dtfImages) ? parsed.dtfImages : [];
-    next.settings = parsed.settings && typeof parsed.settings === 'object' ? parsed.settings : {defaultThreshold:5};
-    if (typeof next.settings.defaultThreshold !== 'number') next.settings.defaultThreshold = 5;
-    if (!Array.isArray(next.settings.colorAliases)) next.settings.colorAliases = [];
-    if (!Array.isArray(next.settings.expectedSizes)) next.settings.expectedSizes = [];
-    next.costs = parsed.costs && typeof parsed.costs === 'object' ? parsed.costs : {};
-    if (!next.costs.rates || typeof next.costs.rates !== 'object') next.costs.rates = {};
-    if (typeof next.costs.rates.blankShirtCost !== 'number') next.costs.rates.blankShirtCost = 0;
-    if (typeof next.costs.rates.dtfCostPerMeter !== 'number') next.costs.rates.dtfCostPerMeter = 0;
-    if (!Array.isArray(next.costs.expenses)) next.costs.expenses = [];
-    if (!Array.isArray(next.costs.machines)) next.costs.machines = [];
-    if (!Array.isArray(next.costs.ledger)) next.costs.ledger = [];
-  });
-  /* Mismo ajuste que en submitNewOrder(): sin este render(), el diálogo de
-     confirmación de restauración se quedaba visible hasta el siguiente
-     cambio de pantalla en modo local/sin conexión. */
-  ui.restorePending = false; ui.restoreRaw = '';
-  render();
+  /* normalizeState() se encarga de todo el saneado y las migraciones
+     (recipe de producto, prep/autoFulfilled de pedidos, altoCm/unitCost
+     de materiales, tags de imágenes DTF...): así una copia de seguridad
+     antigua queda tan completa como el estado normal al cargar, en vez de
+     repetir aquí a mano solo una parte de esas reglas y arriesgarse a que
+     se queden desincronizadas entre sí. */
+  commitAndReset(function(next){
+    var normalized = normalizeState(parsed);
+    Object.keys(normalized).forEach(function(k){ next[k] = normalized[k]; });
+  }, function(){ ui.restorePending = false; ui.restoreRaw = ''; });
 }
 
 })();
